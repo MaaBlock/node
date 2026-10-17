@@ -1,0 +1,123 @@
+name: Build libnode (FCT_Node)
+
+on:
+  push:
+    branches:
+      - fct-build
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Platforms to build (android-arm64, all, linux-x64, linux-arm64, windows-x64)'
+        required: false
+        default: 'android-arm64'
+
+jobs:
+  build-android-arm64:
+    if: ${{ github.event_name == 'push' || inputs.platforms == 'android-arm64' || inputs.platforms == 'all' || inputs.platforms == '' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 ninja-build pkg-config file
+
+      - name: Locate Android NDK
+        id: ndk
+        run: |
+          NDK_27=$(ls -d /usr/local/lib/android/sdk/ndk/27.* 2>/dev/null | tail -n 1 || true)
+          if [ -n "$NDK_27" ] && [ -d "$NDK_27" ]; then
+            NDK_PATH="$NDK_27"
+          elif [ -n "$ANDROID_NDK_HOME" ] && [ -d "$ANDROID_NDK_HOME" ]; then
+            NDK_PATH="$ANDROID_NDK_HOME"
+          elif [ -n "$ANDROID_NDK_LATEST_HOME" ] && [ -d "$ANDROID_NDK_LATEST_HOME" ]; then
+            NDK_PATH="$ANDROID_NDK_LATEST_HOME"
+          else
+            NDK_PATH=$(ls -d /usr/local/lib/android/sdk/ndk/* | tail -n 1)
+          fi
+          echo "Using Android NDK: $NDK_PATH"
+          echo "ndk_path=$NDK_PATH" >> $GITHUB_OUTPUT
+
+      - name: Configure Node.js for Android arm64-v8a
+        run: |
+          ./android-configure "${{ steps.ndk.outputs.ndk_path }}" 31 arm64 --shared --without-intl
+
+      - name: Build libnode.so
+        run: |
+          make -j$(nproc) -C out BUILDTYPE=Release libnode || make -j$(nproc)
+
+      - name: Package Android libnode.so and headers
+        run: |
+          mkdir -p dist/Android/lib/arm64-v8a
+          SO_PATH=$(find out/Release -name "libnode.so" -type f | head -n 1)
+          echo "Found built shared library at: $SO_PATH"
+          cp -L "$SO_PATH" dist/Android/lib/arm64-v8a/libnode.so
+          "${{ steps.ndk.outputs.ndk_path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-debug dist/Android/lib/arm64-v8a/libnode.so
+          file dist/Android/lib/arm64-v8a/libnode.so
+          readelf -d dist/Android/lib/arm64-v8a/libnode.so | grep -E "SONAME|NEEDED"
+
+          mkdir -p dist/src
+          find src -maxdepth 2 \( -name "*.h" -o -name "*.hpp" -o -name "*.inl" \) -exec cp --parents {} dist/ \;
+          mkdir -p dist/deps/v8
+          cp -r deps/v8/include dist/deps/v8/
+          mkdir -p dist/deps/uv
+          cp -r deps/uv/include dist/deps/uv/
+
+      - name: Upload Android arm64-v8a artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libnode-android-arm64-v8a
+          path: dist/
+          retention-days: 30
+
+  build-linux-x64:
+    if: ${{ inputs.platforms == 'linux-x64' || inputs.platforms == 'all' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 ninja-build pkg-config
+      - name: Configure and Build
+        run: |
+          ./configure --shared --ninja
+          ninja -C out/Release libnode
+      - name: Package Linux x64 artifact
+        run: |
+          mkdir -p dist/Linux/lib/Release
+          SO_PATH=$(find out/Release -name "libnode.so.*" -type f | head -n 1)
+          cp -L "$SO_PATH" dist/Linux/lib/Release/
+          strip --strip-debug dist/Linux/lib/Release/*
+          cd dist/Linux/lib/Release && ln -sf libnode.so.* libnode.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libnode-linux-x64
+          path: dist/
+
+  build-windows-x64:
+    if: ${{ inputs.platforms == 'windows-x64' || inputs.platforms == 'all' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Build Windows DLL
+        run: |
+          cmd /c "vcbuild.bat dll release x64"
+      - name: Package Windows x64 artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/Win/bin/Release | Out-Null
+          Copy-Item out/Release/libnode.dll dist/Win/bin/Release/
+          Copy-Item out/Release/libnode.lib dist/Win/bin/Release/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libnode-windows-x64
+          path: dist/
