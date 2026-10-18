@@ -7,9 +7,12 @@ on:
   workflow_dispatch:
     inputs:
       platforms:
-        description: 'Platforms to build (android-arm64, all, linux-x64, linux-arm64, windows-x64)'
+        description: 'Platforms to build (android-arm64, all, linux-x64, windows-x64)'
         required: false
         default: 'android-arm64'
+
+permissions:
+  contents: write
 
 jobs:
   build-android-arm64:
@@ -24,7 +27,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential python3 ninja-build pkg-config file
+          sudo apt-get install -y build-essential python3 ninja-build pkg-config file zip
 
       - name: Locate Android NDK
         id: ndk
@@ -66,6 +69,7 @@ jobs:
           cp -r deps/v8/include dist/deps/v8/
           mkdir -p dist/deps/uv
           cp -r deps/uv/include dist/deps/uv/
+          cd dist && zip -r ../libnode-android-arm64-v8a.zip .
 
       - name: Upload Android arm64-v8a artifact
         uses: actions/upload-artifact@v4
@@ -73,6 +77,13 @@ jobs:
           name: libnode-android-arm64-v8a
           path: dist/
           retention-days: 30
+
+      - name: Publish to GitHub Release (fct-prebuilt)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view fct-prebuilt || gh release create fct-prebuilt --target "${{ github.sha }}" --title "FCT Prebuilt libnode" --notes "Prebuilt libnode binaries and headers built from source via GitHub Actions for FCT_Node."
+          gh release upload fct-prebuilt libnode-android-arm64-v8a.zip --clobber
 
   build-linux-x64:
     if: ${{ inputs.platforms == 'linux-x64' || inputs.platforms == 'all' }}
@@ -84,7 +95,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential python3 ninja-build pkg-config
+          sudo apt-get install -y build-essential python3 ninja-build pkg-config zip
       - name: Configure and Build
         run: |
           ./configure --shared --ninja
@@ -95,11 +106,22 @@ jobs:
           SO_PATH=$(find out/Release -name "libnode.so.*" -type f | head -n 1)
           cp -L "$SO_PATH" dist/Linux/lib/Release/
           strip --strip-debug dist/Linux/lib/Release/*
-          cd dist/Linux/lib/Release && ln -sf libnode.so.* libnode.so
+          cd dist/Linux/lib/Release && ln -sf libnode.so.* libnode.so && cd ../../..
+          mkdir -p dist/src
+          find src -maxdepth 2 \( -name "*.h" -o -name "*.hpp" -o -name "*.inl" \) -exec cp --parents {} dist/ \;
+          mkdir -p dist/deps/v8 && cp -r deps/v8/include dist/deps/v8/
+          mkdir -p dist/deps/uv && cp -r deps/uv/include dist/deps/uv/
+          cd dist && zip -r ../libnode-linux-x64.zip .
       - uses: actions/upload-artifact@v4
         with:
           name: libnode-linux-x64
           path: dist/
+      - name: Publish to GitHub Release (fct-prebuilt)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view fct-prebuilt || gh release create fct-prebuilt --target "${{ github.sha }}" --title "FCT Prebuilt libnode" --notes "Prebuilt libnode binaries and headers built from source via GitHub Actions for FCT_Node."
+          gh release upload fct-prebuilt libnode-linux-x64.zip --clobber
 
   build-windows-x64:
     if: ${{ inputs.platforms == 'windows-x64' || inputs.platforms == 'all' }}
@@ -117,7 +139,17 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist/Win/bin/Release | Out-Null
           Copy-Item out/Release/libnode.dll dist/Win/bin/Release/
           Copy-Item out/Release/libnode.lib dist/Win/bin/Release/
+          Compress-Archive -Path "dist/*" -DestinationPath "libnode-windows-x64.zip" -Force
       - uses: actions/upload-artifact@v4
         with:
           name: libnode-windows-x64
           path: dist/
+      - name: Publish to GitHub Release (fct-prebuilt)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view fct-prebuilt 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create fct-prebuilt --target "${{ github.sha }}" --title "FCT Prebuilt libnode" --notes "Prebuilt libnode binaries and headers built from source via GitHub Actions for FCT_Node."
+          }
+          gh release upload fct-prebuilt libnode-windows-x64.zip --clobber
